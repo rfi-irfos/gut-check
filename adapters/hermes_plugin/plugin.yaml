@@ -1,0 +1,9 @@
+name: gut_check
+version: 0.1.0
+description: "System-1/System-2 verification gate: calls the gut-check sidecar on completion claims and nudges the agent to keep verifying when confidence is low, instead of trusting a self-report."
+author: RFI-IRFOS
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
