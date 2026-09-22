@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Private session-derived training/eval data never belongs in this public repo.
+# Real trace content is mined locally and only aggregate/redacted artifacts get committed.
+training/eval/local_data/
+training/mining/local_data/
+*.jsonl
+!docs/**/*.jsonl
