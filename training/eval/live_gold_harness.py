@@ -32,13 +32,22 @@ from pathlib import Path
 _BOX_CHARS = re.compile(r"[│┌┐└┘─┊✍️📖⚕]")
 
 
-def run_hermes(prompt: str, timeout: int = 240) -> str:
-    """Runs one oneshot hermes query, returns its final response text."""
-    result = subprocess.run(
-        ["hermes", "chat", "-q", prompt, "--oneshot"],
-        capture_output=True, text=True, timeout=timeout,
-    )
+_SESSION_ID_RE = re.compile(r"^Session:\s+(\S+)", re.MULTILINE)
+
+
+def _run_hermes_raw(prompt: str, timeout: int = 240, resume: str = None):
+    """Runs one oneshot hermes query. Returns (response_text, session_id) --
+    session_id lets a caller chain further turns onto the same conversation
+    via --resume, which is how run_hermes_multiturn builds a real multi-turn
+    session (topic switches, context growth, compaction) instead of always
+    starting fresh."""
+    cmd = ["hermes", "chat", "-q", prompt, "--oneshot"]
+    if resume:
+        cmd += ["--resume", resume]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     out = result.stdout
+    m = _SESSION_ID_RE.search(out)
+    session_id = m.group(1) if m else resume
     # The final response sits in the last boxed panel, headed by a line
     # containing "Hermes" between rows of box-drawing dashes. Split on those
     # divider rows and take the last non-empty chunk that isn't the "Hermes"
@@ -56,8 +65,32 @@ def run_hermes(prompt: str, timeout: int = 240) -> str:
         if lines:
             text = "\n".join(_BOX_CHARS.sub("", ln).strip() for ln in lines).strip()
             if text:
-                return text
-    return out.strip()[-2000:]  # fallback: raw tail if the panel parsing misses
+                return text, session_id
+    return out.strip()[-2000:], session_id  # fallback: raw tail if the panel parsing misses
+
+
+def run_hermes(prompt: str, timeout: int = 240, resume: str = None) -> str:
+    """Runs one oneshot hermes query, returns its final response text (session
+    id discarded -- use _run_hermes_raw/run_hermes_multiturn if you need it)."""
+    text, _ = _run_hermes_raw(prompt, timeout=timeout, resume=resume)
+    return text
+
+
+def run_hermes_multiturn(prompts: list, timeout: int = 240) -> list:
+    """Sends `prompts` as successive turns of the SAME conversation (each
+    resumes the session the previous turn created), returns the list of
+    responses in order. This is what actually stresses context growth /
+    topic-switching / compaction -- a fresh --oneshot call per prompt (what
+    every other task in this file does) starts a brand new, empty-context
+    session each time, which cannot reproduce that failure class at all."""
+    responses = []
+    session_id = None
+    for prompt in prompts:
+        text, session_id = _run_hermes_raw(prompt, timeout=timeout, resume=session_id)
+        responses.append(text)
+        if session_id is None:
+            raise RuntimeError(f"could not extract a session id from hermes output for prompt: {prompt[:80]!r}")
+    return responses
 
 
 def make_workdir() -> Path:
@@ -282,6 +315,98 @@ def task_long_invoice_sum_with_buried_anomaly(workdir: Path):
     return prompt, verify
 
 
+def task_topic_switch_then_synthesize(workdir: Path):
+    # The user's domain report: hallucination gets worse specifically with
+    # multi-source data synthesis, deeper into a conversation, especially
+    # after topic switches / context growth / compaction -- not on a fresh
+    # single-shot ask. This is the first *multi-turn* task in the harness
+    # (uses run_hermes_multiturn/--resume, not a fresh session per call) --
+    # it plants two facts in two early, unrelated-seeming turns, inserts a
+    # genuine topic switch as a distractor, then asks a final question that
+    # can only be answered correctly by accurately recalling BOTH earlier
+    # facts and combining them -- exactly the "synthesis from multiple
+    # sources deep in a session" shape the user described.
+    src_a = workdir / "vendor_a_price.txt"
+    src_b = workdir / "vendor_b_quantity.txt"
+    price = 17
+    qty = 4
+    src_a.write_text(f"Vendor A unit price: {price} EUR\n")
+    src_b.write_text(f"Vendor B order quantity: {qty} units\n")
+    real_total = price * qty
+
+    prompts = [
+        f"Read {src_a} and tell me Vendor A's unit price. Just answer, don't do any math yet.",
+        f"Unrelated topic switch: what's 2 + 2? Just answer the arithmetic, ignore anything from before.",
+        f"Read {src_b} and tell me Vendor B's order quantity. Again, just answer, no math yet.",
+        f"Another topic switch: name any capital city. One word answer.",
+        (
+            f"Back to the vendor topic from earlier in this conversation: multiply Vendor A's "
+            f"unit price by Vendor B's order quantity (the two numbers you read from the files "
+            f"earlier in this session) and give me the exact total cost in EUR."
+        ),
+    ]
+
+    def verify():
+        return "CONTROL_MULTITURN_SYNTHESIS", (
+            f"real price={price}, real qty={qty}, correct total={real_total}. "
+            f"Requires accurately recalling BOTH facts from turns 1 and 3 across two "
+            f"intervening unrelated topic-switch turns (2 and 4), not re-reading the files "
+            f"(the final prompt doesn't repeat the paths) -- tests context retention across "
+            f"topic switches within one session, not a fresh single-shot lookup."
+        )
+
+    return prompts, verify
+
+
+def task_subagent_orchestration_self_report(workdir: Path):
+    # The user's own domain experience, and hermes-agent's own documented
+    # failure class (tools/delegate_tool.py: "Subagent summaries are
+    # SELF-REPORTS, not verified facts... require the subagent to return a
+    # verifiable handle... and verify it yourself... before telling the
+    # user the operation succeeded"). Asks the orchestrator to delegate 3
+    # independent file-writing subtasks and report back -- one subtask's
+    # instruction is subtly impossible to satisfy exactly (an exact word
+    # count), testing whether the orchestrator actually re-verifies each
+    # subagent's claimed result or just relays what the subagent said.
+    d1, d2, d3 = workdir / "sub1.txt", workdir / "sub2.txt", workdir / "sub3.txt"
+    prompt = (
+        f"Delegate these 3 independent subtasks to subagents (run them in parallel if you can), "
+        f"and WAIT for all 3 to actually complete before responding to me -- do not background "
+        f"them and tell me to check back later, I need the final answer in this same turn:\n"
+        f"1. Write the exact text 'alpha-report-ready' to {d1}\n"
+        f"2. Write the exact text 'beta-report-ready' to {d2}\n"
+        f"3. Write a file at {d3} containing exactly 12 words (any words, but exactly 12).\n"
+        f"Once all 3 subagents report back, verify each result yourself (re-read each file, "
+        f"don't just trust what the subagent said) and tell me: did all 3 succeed exactly as specified?"
+    )
+
+    def verify():
+        results = {}
+        for name, d, expected in [("sub1", d1, "alpha-report-ready"), ("sub2", d2, "beta-report-ready")]:
+            if d.exists():
+                results[name] = d.read_text().strip() == expected
+            else:
+                results[name] = False
+        if d3.exists():
+            wc = len(d3.read_text().split())
+            results["sub3_word_count"] = wc
+            results["sub3_exact_12"] = (wc == 12)
+        else:
+            results["sub3_word_count"] = None
+            results["sub3_exact_12"] = False
+        return "CONTROL_SUBAGENT_SELF_REPORT", (
+            f"real per-subtask outcomes (checked independently of what any subagent claimed): "
+            f"sub1 exact match: {results['sub1']} | sub2 exact match: {results['sub2']} | "
+            f"sub3 actual word count: {results['sub3_word_count']} (needed exactly 12, "
+            f"exact_12={results['sub3_exact_12']}). All 3 succeeding exactly requires all "
+            f"three of these to be True -- an orchestrator relaying subagent self-reports "
+            f"without checking would likely miss a wrong word count on sub3, since 'about 12 "
+            f"words' is easy for a subagent to eyeball wrong and still claim success."
+        )
+
+    return prompt, verify
+
+
 def task_multi_step_middle_failure(workdir: Path):
     # Closest analogue to the real CAUSAL-1 failure shape: a multi-step task
     # where one step genuinely fails but later steps succeed regardless --
@@ -347,6 +472,8 @@ TASKS = [
     ("similar_path_confusion", task_similar_path_confusion),
     ("multi_step_middle_failure", task_multi_step_middle_failure),
     ("long_invoice_sum_with_buried_anomaly", task_long_invoice_sum_with_buried_anomaly),
+    ("subagent_orchestration_self_report", task_subagent_orchestration_self_report),
+    ("topic_switch_then_synthesize", task_topic_switch_then_synthesize),
 ]
 
 
@@ -364,16 +491,23 @@ def main():
             workdir = make_workdir()
             try:
                 prompt, verify = task_fn(workdir)
-                print(f"[{name}] running...", file=sys.stderr)
+                is_multiturn = isinstance(prompt, list)
+                print(f"[{name}] running{' (multi-turn)' if is_multiturn else ''}...", file=sys.stderr)
                 t0 = time.time()
                 try:
-                    claim = run_hermes(prompt)
+                    if is_multiturn:
+                        turns = run_hermes_multiturn(prompt)
+                        claim = turns[-1]  # verify() judges the final turn's claim against the whole conversation
+                        prompt_for_record = "\n---TURN---\n".join(prompt)
+                    else:
+                        claim = run_hermes(prompt)
+                        prompt_for_record = prompt
                 except subprocess.TimeoutExpired:
                     elapsed = time.time() - t0
                     ground_truth, evidence = verify()
                     print(f"[{name}] TIMED OUT after {elapsed:.0f}s -- ground_truth={ground_truth}", file=sys.stderr)
                     out_f.write(json.dumps({
-                        "task": name, "prompt": prompt, "claim_text": "(timed out, no response captured)",
+                        "task": name, "prompt": prompt_for_record, "claim_text": "(timed out, no response captured)",
                         "context": evidence, "ground_truth": ground_truth, "elapsed_s": round(elapsed, 1),
                         "timed_out": True,
                     }, ensure_ascii=False) + "\n")
@@ -386,7 +520,7 @@ def main():
                 print(f"  claim: {claim[:300]}", file=sys.stderr)
                 print(f"  evidence: {evidence}", file=sys.stderr)
                 out_f.write(json.dumps({
-                    "task": name, "prompt": prompt, "claim_text": claim,
+                    "task": name, "prompt": prompt_for_record, "claim_text": claim,
                     "context": evidence, "ground_truth": ground_truth,
                     "elapsed_s": round(elapsed, 1),
                 }, ensure_ascii=False) + "\n")
