@@ -134,7 +134,7 @@ def collate_train_batch(items, pad_id):
 
 
 @app.function(gpu="A10G", timeout=3600)
-def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict) -> dict:
+def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, seed: int = 42) -> dict:
     import random
     import time
 
@@ -149,6 +149,7 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict) -> 
     from laya.agent import _fix_tokenizer_config
     from laya.common import build_model, proper_reward
 
+    torch.manual_seed(seed)
     device = torch.device("cuda")
     model_dir = snapshot_download(MODEL_ID)
     _fix_tokenizer_config(model_dir)
@@ -188,7 +189,7 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict) -> 
 
     t0 = time.time()
     for epoch in range(EPOCHS):
-        random.seed(42 + epoch)
+        random.seed(seed + epoch)
         random.shuffle(items)
         epoch_loss, n_batches, accum_step = 0.0, 0, 0
         optimizer.zero_grad(set_to_none=True)
@@ -362,7 +363,7 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict) -> 
 
 
 @app.local_entrypoint()
-def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None):
+def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, seed: int = 42):
     teacher_labeled = teacher_labeled or str(
         Path.home() / "projects" / "gut-check" / "training" / "eval" / "local_data" / "combined_teacher_labeled.jsonl"
     )
@@ -379,14 +380,20 @@ def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None):
     gold_items = [{"id": r["id"], "claim_text": r["claim_text"], "context": r["context"]} for r in gold_rows]
     gold_truth = {str(r["id"]): r["label"] for r in gold_rows}
 
-    print(f"training on {len(rows)} teacher-labeled rows, evaluating on {len(gold_items)} gold items")
-    result = finetune.remote(rows, gold_items, gold_truth)
+    print(f"training on {len(rows)} teacher-labeled rows (seed={seed}), evaluating on {len(gold_items)} gold items")
+    result = finetune.remote(rows, gold_items, gold_truth, seed=seed)
 
     print(f"\nn_train_items: {result['n_train_items']}")
     print(f"gold-set accuracy: {result['gold_accuracy']:.1%}")
     print("(compare against baselines: 52.7% heuristic, 38.2% stock checkpoint)")
 
-    out_dir = Path.home() / "projects" / "gut-check" / "training" / "finetune" / "local_data" / "causal_claim_v1"
+    # Versioned, never-overwritten run dirs -- a single mistaken re-run must
+    # never silently destroy the best checkpoint found so far (happened once:
+    # a worse re-run overwrote a 43.6%-accuracy checkpoint with no backup).
+    runs_dir = Path.home() / "projects" / "gut-check" / "training" / "finetune" / "local_data" / "runs"
+    import time as _time
+    run_id = f"seed{seed}_n{result['n_train_items']}_{_time.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = runs_dir / run_id
     (out_dir / "tokenizer").mkdir(parents=True, exist_ok=True)
     (out_dir / "encoder").mkdir(parents=True, exist_ok=True)
 
@@ -402,3 +409,13 @@ def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None):
 
     print(f"\nsaved a self-contained laya.Agent checkpoint to {out_dir}")
     print(f'load it with: laya.load("{out_dir}")')
+
+    best_path = runs_dir / "best_run.json"
+    best = json.loads(best_path.read_text()) if best_path.exists() else {"accuracy": -1.0, "run_id": None}
+    if result["gold_accuracy"] > best["accuracy"]:
+        best_path.write_text(json.dumps({"accuracy": result["gold_accuracy"], "run_id": run_id}, indent=2))
+        print(f"NEW BEST: {result['gold_accuracy']:.1%} (previous best: "
+              f"{best['accuracy']:.1%} from {best['run_id']})")
+    else:
+        print(f"not a new best ({result['gold_accuracy']:.1%} <= current best "
+              f"{best['accuracy']:.1%} from {best['run_id']})")
