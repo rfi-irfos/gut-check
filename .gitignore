@@ -9,5 +9,6 @@ build/
 # Real trace content is mined locally and only aggregate/redacted artifacts get committed.
 training/eval/local_data/
 training/mining/local_data/
+training/finetune/local_data/
 *.jsonl
 !docs/**/*.jsonl
