@@ -19,9 +19,11 @@ Usage:
         --limit 100
 """
 import argparse
+import concurrent.futures
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -99,6 +101,9 @@ def main():
     ap.add_argument("--base-url", default="https://openrouter.ai/api/v1")
     ap.add_argument("--api-key-env", default="OPENROUTER_API_KEY")
     ap.add_argument("--limit", type=int, default=None, help="Cap the number of candidates labeled (pilot runs).")
+    ap.add_argument("--concurrency", type=int, default=8,
+                     help="Parallel teacher calls. Network-bound work against a flaky/rate-limited "
+                          "endpoint benefits a lot from this -- raise it if the provider tolerates more.")
     ap.add_argument("--skip-weak-unverified", action="store_true",
                      help="Skip candidates the heuristic already called UNVERIFIED with "
                           "no_observation_in_window -- no evidence exists to relabel.")
@@ -125,40 +130,58 @@ def main():
                     already_done.add(json.loads(line)["claim_text"])
         print(f"resuming: {len(already_done)} already labeled in {args.out}", file=sys.stderr)
 
-    n_labeled = n_skipped_leak = n_skipped_no_evidence = n_errors = n_skipped_done = 0
-    agree_with_heuristic = 0
-    with open(args.out, "a") as out:
-        for i, c in enumerate(candidates):
-            if c["claim_text"] in already_done:
-                n_skipped_done += 1
-                continue
-            session_ref = c.get("session_file") or c.get("session_id", "")
-            if is_leaked(session_ref, c["claim_text"]):
-                n_skipped_leak += 1
-                continue
-            if args.skip_weak_unverified and c.get("label_reason") == "no_observation_in_window":
-                n_skipped_no_evidence += 1
-                continue
+    n_skipped_leak = n_skipped_no_evidence = n_skipped_done = 0
+    pending = []
+    for c in candidates:
+        if c["claim_text"] in already_done:
+            n_skipped_done += 1
+            continue
+        session_ref = c.get("session_file") or c.get("session_id", "")
+        if is_leaked(session_ref, c["claim_text"]):
+            n_skipped_leak += 1
+            continue
+        if args.skip_weak_unverified and c.get("label_reason") == "no_observation_in_window":
+            n_skipped_no_evidence += 1
+            continue
+        pending.append(c)
 
-            try:
-                teacher = call_teacher(args.base_url, api_key, args.model, build_user_prompt(c))
-            except Exception as e:
-                print(f"  [{i}] teacher call failed permanently: {e}", file=sys.stderr)
+    n_labeled = n_errors = 0
+    agree_with_heuristic = 0
+    write_lock = threading.Lock()
+    out_f = open(args.out, "a")
+
+    def label_one(c):
+        try:
+            return c, call_teacher(args.base_url, api_key, args.model, build_user_prompt(c)), None
+        except Exception as e:
+            return c, None, e
+
+    # Network I/O bound (each call is a slow, often-503ing remote request) --
+    # concurrency turns a rate of ~1 item/minute into something that finishes
+    # in a sane amount of time against a flaky provider, instead of paying
+    # the full retry/backoff cost of every failure serially.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        futures = [pool.submit(label_one, c) for c in pending]
+        for i, fut in enumerate(concurrent.futures.as_completed(futures)):
+            c, teacher, err = fut.result()
+            if err is not None:
+                print(f"  teacher call failed permanently: {err}", file=sys.stderr)
                 n_errors += 1
                 continue
-
             c["teacher_label"] = teacher["label"]
             c["teacher_rationale"] = teacher.get("rationale", "")
             c["teacher_model"] = args.model
             c["label_source"] = "teacher_llm"
             if teacher["label"] == c.get("label"):
                 agree_with_heuristic += 1
-            out.write(json.dumps(c, ensure_ascii=False) + "\n")
-            out.flush()  # a killed/timed-out run must not lose progress already on disk
+            with write_lock:
+                out_f.write(json.dumps(c, ensure_ascii=False) + "\n")
+                out_f.flush()  # a killed/timed-out run must not lose progress already on disk
             n_labeled += 1
 
             if (i + 1) % 20 == 0:
-                print(f"...{i+1}/{len(candidates)} processed, {n_labeled} labeled", file=sys.stderr)
+                print(f"...{i+1}/{len(pending)} processed, {n_labeled} labeled", file=sys.stderr)
+    out_f.close()
 
     print(f"\nlabeled:          {n_labeled}")
     print(f"skipped (gold leak): {n_skipped_leak}")

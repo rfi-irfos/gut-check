@@ -59,13 +59,20 @@ def write_review_sheet(sample, out_path):
 
 
 def parse_review_sheet(sheet_path):
+    """Splits on the '## N. teacher_label: ...' item headers, not on bare '---'
+    lines -- an observation excerpt can itself contain a literal '---' (e.g. a
+    shell command's own output), which silently truncated items when this used
+    to split on '\\n---\\n' like write_review_sheet's own section separator."""
     text = open(sheet_path).read()
+    header_re = re.compile(r"^## \d+\. teacher_label: (\w+)", re.MULTILINE)
+    starts = [(m.start(), m.group(1)) for m in header_re.finditer(text)]
     items = []
-    for block in re.split(r"\n---\n", text):
-        m_teacher = re.search(r"teacher_label:\s*(\w+)", block)
-        m_human = re.search(r"human_label:\s*(\w+)", block)
-        if m_teacher and m_human:
-            items.append({"teacher_label": m_teacher.group(1), "human_label": m_human.group(1)})
+    for i, (start, teacher_label) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(text)
+        block = text[start:end]
+        m_human = re.search(r"^human_label:\s*(\w+)", block, re.MULTILINE)
+        if m_human:
+            items.append({"teacher_label": teacher_label, "human_label": m_human.group(1)})
     return items
 
 
