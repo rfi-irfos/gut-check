@@ -77,7 +77,7 @@ def call_teacher(base_url: str, api_key: str, model: str, user_prompt: str,
     )
     for attempt in range(max_retries):
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read())
             content = data["choices"][0]["message"]["content"]
             parsed = json.loads(content)
@@ -114,10 +114,24 @@ def main():
     if args.limit:
         candidates = candidates[: args.limit]
 
-    n_labeled = n_skipped_leak = n_skipped_no_evidence = n_errors = 0
+    # Resume-safe: a flaky teacher API means a run can be killed mid-batch.
+    # Append rather than truncate, and skip whatever's already labeled on disk
+    # (keyed by claim_text -- candidates don't carry a stable cross-run id).
+    already_done = set()
+    if os.path.exists(args.out):
+        with open(args.out) as f:
+            for line in f:
+                if line.strip():
+                    already_done.add(json.loads(line)["claim_text"])
+        print(f"resuming: {len(already_done)} already labeled in {args.out}", file=sys.stderr)
+
+    n_labeled = n_skipped_leak = n_skipped_no_evidence = n_errors = n_skipped_done = 0
     agree_with_heuristic = 0
-    with open(args.out, "w") as out:
+    with open(args.out, "a") as out:
         for i, c in enumerate(candidates):
+            if c["claim_text"] in already_done:
+                n_skipped_done += 1
+                continue
             session_ref = c.get("session_file") or c.get("session_id", "")
             if is_leaked(session_ref, c["claim_text"]):
                 n_skipped_leak += 1
@@ -140,6 +154,7 @@ def main():
             if teacher["label"] == c.get("label"):
                 agree_with_heuristic += 1
             out.write(json.dumps(c, ensure_ascii=False) + "\n")
+            out.flush()  # a killed/timed-out run must not lose progress already on disk
             n_labeled += 1
 
             if (i + 1) % 20 == 0:
