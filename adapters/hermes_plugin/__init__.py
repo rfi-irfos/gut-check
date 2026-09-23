@@ -3,16 +3,18 @@
 Registers on the `pre_verify` hook (hermes_cli/plugins.py's VALID_HOOKS) --
 fires once per turn right before a completion claim surfaces, the same point
 `agent/verification_stop.py`'s own evidence-nudge already runs at. Calls the
-gut-check sidecar (a separate process, see adapters/lauras_kernel_sidecar) on
-the turn's final_response text; on low confidence, this is where escalation
-to "System 2" happens -- but concretely, for this host, System 2 IS the same
-big LLM hermes is already running the turn with. So the escalation call here
-isn't a second LLM invocation gut-check makes itself: it's a `pre_verify`
-"continue" directive that hands the uncertainty hint back to hermes' own
-verify loop, which re-prompts its own model with that hint. This is the
-idiomatic fit for hermes' actual hook contract, not a generic external
-system_two_call like core/gate/escalation.py's default shape assumes --
-see docs/architecture.md "hermes-agent: escalation realized as hook return".
+gut-check MCP server (adapters/mcp_server/gut_check_mcp/server.py, spawned as
+a `python -m gut_check_mcp.server` subprocess and talked to over MCP-over-
+stdio) on the turn's final_response text; on low confidence, this is where
+escalation to "System 2" happens -- but concretely, for this host, System 2
+IS the same big LLM hermes is already running the turn with. So the
+escalation call here isn't a second LLM invocation gut-check makes itself:
+it's a `pre_verify` "continue" directive that hands the uncertainty hint
+back to hermes' own verify loop, which re-prompts its own model with that
+hint. This is the idiomatic fit for hermes' actual hook contract, not a
+generic external system_two_call like core/gate/escalation.py's default
+shape assumes -- see docs/architecture.md "hermes-agent: escalation
+realized as hook return".
 
 Ships observation-only by default (GUT_CHECK_ENFORCE unset): every verdict is
 logged, but pre_verify never returns a "continue" directive, so nothing about
@@ -32,34 +34,50 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("gut_check_plugin")
 
-DEFAULT_SIDECAR_URL = os.environ.get("GUT_CHECK_SIDECAR_URL", "http://localhost:8420")
+# adapters/hermes_plugin/__init__.py -> repo root is two levels up.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_MCP_SERVER_DIR = str(_REPO_ROOT / "adapters" / "mcp_server")
+GUT_CHECK_MCP_SERVER_DIR = os.environ.get("GUT_CHECK_MCP_SERVER_DIR", _DEFAULT_MCP_SERVER_DIR)
 ENFORCE = os.environ.get("GUT_CHECK_ENFORCE", "").strip().lower() in ("1", "true", "yes")
 CONFIDENCE_THRESHOLD = float(os.environ.get("GUT_CHECK_CONFIDENCE_THRESHOLD", "0.55"))
 
 
-def _call_sidecar(claim: str, context: str) -> Optional[Dict[str, Any]]:
+def _call_gate(claim: str, context: str) -> Optional[Dict[str, Any]]:
     try:
-        import urllib.request
-        import json
+        import asyncio
+        import json as _json
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
 
-        body = json.dumps({
-            "claim": claim, "context": context,
-            "confidence_threshold": CONFIDENCE_THRESHOLD,
-        }).encode()
-        req = urllib.request.Request(
-            f"{DEFAULT_SIDECAR_URL}/classify", data=body,
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read())
+        async def _call():
+            server_params = StdioServerParameters(
+                command="python3",
+                args=["-m", "gut_check_mcp.server"],
+                cwd=GUT_CHECK_MCP_SERVER_DIR,
+            )
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        "verify_claim", {"claim_text": claim, "context": context},
+                    )
+                    # call_tool returns a CallToolResult whose .content is a list of
+                    # content blocks -- FastMCP serializes a dict tool return as a
+                    # single TextContent block holding a JSON string, not a plain
+                    # dict. Unmarshal it here so the caller (_pre_verify below) can
+                    # keep using verdict.get("choice") etc. unchanged.
+                    return _json.loads(result.content[0].text)
+
+        return asyncio.run(_call())
     except Exception as e:
-        # Never blocks the turn on sidecar unavailability -- mirrors
+        # Never blocks the turn on gate unavailability -- mirrors
         # lauras-agents-gate's local-fallback-on-unreachable behavior.
-        logger.info("gut-check sidecar unreachable (%s), skipping this turn's gate", e)
+        logger.info("gut-check MCP gate unreachable (%s), skipping this turn's gate", e)
         return None
 
 
@@ -76,7 +94,7 @@ def _pre_verify(*, session_id: str = "", platform: str = "", model: str = "",
         return None
 
     context = _build_context(changed_paths or [])
-    verdict = _call_sidecar(final_response, context)
+    verdict = _call_gate(final_response, context)
     if verdict is None:
         return None
 
@@ -103,4 +121,7 @@ def _pre_verify(*, session_id: str = "", platform: str = "", model: str = "",
 def register(ctx) -> None:
     ctx.register_hook("pre_verify", _pre_verify)
     mode = "ENFORCE" if ENFORCE else "observation-only"
-    logger.info("gut-check plugin registered (sidecar=%s, mode=%s)", DEFAULT_SIDECAR_URL, mode)
+    logger.info(
+        "gut-check plugin registered (mcp_server_dir=%s, mode=%s)",
+        GUT_CHECK_MCP_SERVER_DIR or "adapters/mcp_server (default)", mode,
+    )
