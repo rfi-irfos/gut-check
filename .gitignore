@@ -12,3 +12,4 @@ training/mining/local_data/
 training/finetune/local_data/
 *.jsonl
 !docs/**/*.jsonl
+.superpowers/
