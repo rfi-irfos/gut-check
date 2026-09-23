@@ -548,6 +548,7 @@ def run_mining() -> list[dict]:
     )
     subprocess.run(
         [sys.executable, str(REPO / "training" / "mining" / "extract_hermes_traces.py"),
+         "--db", str(Path.home() / ".hermes" / "state.db"),
          "--out", str(LOCAL_DATA / "hermes_candidates.jsonl")],
         check=True,
     )
