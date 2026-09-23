@@ -943,6 +943,7 @@ In `adapters/hermes_plugin/__init__.py`, replace the `_call_sidecar` function (l
 def _call_gate(claim: str, context: str) -> Optional[Dict[str, Any]]:
     try:
         import asyncio
+        import json as _json
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -958,7 +959,12 @@ def _call_gate(claim: str, context: str) -> Optional[Dict[str, Any]]:
                     result = await session.call_tool(
                         "verify_claim", {"claim_text": claim, "context": context},
                     )
-                    return result
+                    # call_tool returns a CallToolResult whose .content is a list of
+                    # content blocks -- FastMCP serializes a dict tool return as a
+                    # single TextContent block holding a JSON string, not a plain
+                    # dict. Unmarshal it here so the caller (_pre_verify below) can
+                    # keep using verdict.get("choice") etc. unchanged.
+                    return _json.loads(result.content[0].text)
 
         return asyncio.run(_call())
     except Exception as e:
