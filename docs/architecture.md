@@ -66,3 +66,20 @@ adapter in v1:
 
 Building either is a matter of mining/labeling data and fine-tuning a
 checkpoint for that question, not changing the core library.
+
+## Recurring Stage C growth
+
+`training/pipeline/nightly_stage_c.py` runs nightly at 03:00 via crontab
+(see `crontab -l`), mining both corpora, deduping against already-labeled
+claims, prioritizing scarce classes, and labeling a capped batch (200 items,
+concurrency 6). Every batch still requires a manual stratified-sample
+verification pass (`training/labeling/human_verify_sample.py sample` then
+`score`) before being trusted for fine-tuning -- this job automates mining
+and labeling, not the quality gate.
+
+NIM's free tier is sometimes heavily overloaded (observed repeatedly during
+development, e.g. 2026-09-22/23) -- a given night's batch may net 0 newly
+labeled items if every teacher call times out. This is expected and
+self-healing: failed-to-label candidates never enter
+`combined_teacher_labeled.jsonl`, so the next night's dedup step naturally
+requeues them without any special retry bookkeeping.
