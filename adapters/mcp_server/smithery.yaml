@@ -1,0 +1,22 @@
+# adapters/mcp_server/smithery.yaml
+runtime: python
+entrypoint: gut_check_mcp.server:app
+name: gut-check
+description: >
+  Fast System-1 verification gate for agent completion claims. Classifies a
+  claim against nearby evidence and signals when confidence is low enough to
+  warrant deeper verification -- never blocks or verifies on its own.
+tools:
+  - name: verify_claim
+    description: >
+      Classify a status/completion claim (e.g. "tests pass", "deployed
+      successfully") against the nearest available evidence text. Returns a
+      verdict (VERIFIED/CONTRADICTED/UNVERIFIED/SKIP), a confidence score,
+      and whether the calling agent should escalate to deeper verification.
+    parameters:
+      claim_text:
+        type: string
+        description: The claim text to verify.
+      context:
+        type: string
+        description: The nearest available evidence (tool output, log excerpt, etc.).
