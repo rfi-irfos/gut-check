@@ -3,9 +3,9 @@ human verification, in the same review-sheet format the original 55-item
 spot check used -- so the same review workflow applies at any scale.
 
 Also computes the go/no-go gate once a filled-in sheet is parsed back:
-teacher error rate vs. the known 47% heuristic baseline. Fix the teacher
-prompt/model before scaling up if this doesn't clear that bar -- see
-score_reviewed_sheet().
+teacher error rate vs. the current 25.7% heuristic baseline (measured against
+74-item gold set). Fix the teacher prompt/model before scaling up if this
+doesn't clear that bar -- see score_reviewed_sheet().
 
 Usage:
     python human_verify_sample.py sample --in teacher_labeled.jsonl \

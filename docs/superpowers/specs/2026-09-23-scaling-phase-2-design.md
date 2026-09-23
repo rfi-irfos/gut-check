@@ -2,9 +2,9 @@
 
 ## Context
 
-Phase 1 (this repo's first ~24h) shipped: the core gate library, the Claude-Code + Hermes mining pipelines, a teacher-labeling pipeline that scaled Stage C from 55 hand-verified items to 5,400 teacher-labeled items (1.1% measured teacher error rate on the latest 88-item verification sample — well under the 47% heuristic baseline), a growing gold eval set (74 items, up from the original 55), a live-harness that tests real running Hermes sessions and found two genuine CONTRADICTED failures (both arithmetic/counting slips under multi-step load, not fabrication), a draft-but-tested lauras-agents-kernel integration (PR #8, 335 tests green, FlagOnly), and a structurally-tested (12/12) hermes-agent native plugin that directly imports `core/gate`.
+Phase 1 (this repo's first ~24h) shipped: the core gate library, the Claude-Code + Hermes mining pipelines, a teacher-labeling pipeline that scaled Stage C from 55 hand-verified items to 5,400 teacher-labeled items (1.1% measured teacher error rate on the latest 88-item verification sample — well under the 25.7% heuristic baseline on the current 74-item gold set), a growing gold eval set (74 items, up from the original 55), a live-harness that tests real running Hermes sessions and found two genuine CONTRADICTED failures (both arithmetic/counting slips under multi-step load, not fabrication), a draft-but-tested lauras-agents-kernel integration (PR #8, 335 tests green, FlagOnly), and a structurally-tested (12/12) hermes-agent native plugin that directly imports `core/gate`.
 
-Best fine-tuned checkpoint so far: 51.4% gold-set accuracy (seed 4, 5,400-item corpus, 74-item gold set) — but this has never been compared against a heuristic baseline recomputed on the *current* 74-item gold set. The known 52.7% figure is stale, measured only against the original 55 items.
+Best fine-tuned checkpoint so far: 51.4% gold-set accuracy (seed 4, 5,400-item corpus, 74-item gold set) — compared against the current heuristic baseline of 25.7% (recomputed on the current 74-item gold set, up from the original 52.7% measured against 55 items).
 
 This phase has two goals running in sequence with gates between them: (1) make the data/eval foundation trustworthy and growing on its own, (2) generalize the integration layer from "hermes-specific plugin" to "any MCP-capable agent host," and bring the already-built kernel integration live.
 
@@ -21,7 +21,7 @@ Blocks 1-2 improve the checkpoint and its measurement before block 3 exposes it 
 
 ## Block 1: Heuristic rebaseline
 
-**Problem:** the 52.7% heuristic baseline is stale (measured once against the original 55-item gold set). The gold set has since grown to 74 items, 19 of which are live-harness-sourced Hermes items that don't carry the Claude-Code-trace tool metadata (`is_error` flags, structured `nearest_action`/`nearest_observation` fields) the original heuristic script expects.
+**Problem:** the original 52.7% heuristic baseline (measured against 55 items) is now stale. The gold set has grown to 74 items, 19 of which are live-harness-sourced Hermes items that don't carry the Claude-Code-trace tool metadata (`is_error` flags, structured `nearest_action`/`nearest_observation` fields) the original heuristic script expects. The recomputed baseline on the expanded set is 25.7%.
 
 **Design:**
 - New `training/eval/heuristic_baseline.py` in this repo — a clean-room port of the original heuristic logic (is_error check + the four known fix classes already documented in `common_relevance_filter.py`: policy-block false positives, error-word-anywhere false positives, negation polarity, topical irrelevance).
