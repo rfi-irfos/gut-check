@@ -18,6 +18,7 @@ Usage:
     modal run modal_finetune.py --teacher-labeled /path/to/combined_teacher_labeled.jsonl
 """
 import json
+import sys
 from pathlib import Path
 
 import modal
@@ -385,7 +386,17 @@ def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, 
 
     print(f"\nn_train_items: {result['n_train_items']}")
     print(f"gold-set accuracy: {result['gold_accuracy']:.1%}")
-    print("(compare against baselines: 52.7% heuristic, 38.2% stock checkpoint)")
+
+    sys.path.insert(0, str(Path.home() / "projects" / "gut-check" / "training" / "eval"))
+    from heuristic_baseline import score_against_gold
+    heuristic_result = score_against_gold(gold_path)
+    print(f"heuristic baseline (live, same {heuristic_result['n']}-item gold set): "
+          f"{heuristic_result['accuracy']:.1%}")
+    if result["gold_accuracy"] > heuristic_result["accuracy"]:
+        print("fine-tuned checkpoint BEATS the live heuristic baseline on this gold set.")
+    else:
+        print("fine-tuned checkpoint does NOT yet beat the live heuristic baseline on this gold set.")
+    print("(stock non-fine-tuned checkpoint reference: 38.2%, measured once against the original 55-item set)")
 
     # Versioned, never-overwritten run dirs -- a single mistaken re-run must
     # never silently destroy the best checkpoint found so far (happened once:
