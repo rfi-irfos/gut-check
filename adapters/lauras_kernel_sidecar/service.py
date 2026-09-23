@@ -46,7 +46,7 @@ def get_gate() -> Gate:
     global _gate, _load_error
     if _gate is None and _load_error is None:
         try:
-            from router_wrap import default_router  # noqa: E402  (needs core/ on path)
+            from gate.router_wrap import default_router  # noqa: E402  (needs core/ on path)
             _gate = Gate(router=default_router(preload=True))
         except Exception as e:
             _load_error = str(e)
