@@ -110,7 +110,7 @@ def build_training_items(rows, tok, cfg):
     return items
 
 
-def compute_class_weights(items, n_classes):
+def compute_class_weights(items, n_classes, dampen: float = 0.5):
     """Inverse-frequency weights for the CE/RL loss terms.
 
     balance_classes() only caps the single dominant class (UNVERIFIED) down
@@ -121,6 +121,17 @@ def compute_class_weights(items, n_classes):
     items on that run, vs 7/8 true occurrences). Oversampling those classes
     was tried earlier and caused memorization (loss collapsed to ~0.04) --
     this reweights the loss instead, without duplicating any example.
+
+    First attempt used the raw inverse-frequency ratio (dampen=1.0):
+    weights [VERIFIED 0.68, CONTRADICTED 4.31, UNVERIFIED 0.45, SKIP 10.29].
+    That measurably worked -- CONTRADICTED predictions went 1->8 (true 7)
+    and SKIP went 0->2 (true 8) on the 74-item gold set -- but overcorrected:
+    VERIFIED predictions dropped 32->24 (true 46), and overall accuracy fell
+    40.5% (this run) vs 51.4% (undersampling only, no weighting). `dampen`
+    applies `ratio ** dampen` instead of the raw ratio -- 0.5 (sqrt) softens
+    the most extreme weights (10.29 -> 3.21, 4.31 -> 2.08) while keeping the
+    correct direction, to find a better precision/recall trade-off than
+    either the unweighted or the fully-linear-weighted extreme.
     """
     from collections import Counter
 
@@ -129,7 +140,8 @@ def compute_class_weights(items, n_classes):
     weights = [0.0] * n_classes
     for c in range(n_classes):
         if counts.get(c, 0) > 0:
-            weights[c] = total / (n_classes * counts[c])
+            ratio = total / (n_classes * counts[c])
+            weights[c] = ratio ** dampen
     return weights
 
 
