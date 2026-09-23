@@ -170,7 +170,7 @@ def collate_train_batch(items, pad_id):
 
 
 @app.function(gpu="A10G", timeout=3600)
-def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, seed: int = 42) -> dict:
+def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, seed: int = 42, dampen: float = 0.5) -> dict:
     import random
     import time
 
@@ -200,7 +200,7 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, see
     print(f"built {len(items)} training sequences")
 
     n_classes = max(it["label"] for it in items) + 1
-    class_weights = torch.tensor(compute_class_weights(items, n_classes), device=device)
+    class_weights = torch.tensor(compute_class_weights(items, n_classes, dampen=dampen), device=device)
     print(f"class weights (inverse-frequency, {n_classes} classes): {class_weights.tolist()}")
 
     model = build_model(cfg, encoder_dir=f"{model_dir}/encoder")
@@ -405,7 +405,7 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, see
 
 
 @app.local_entrypoint()
-def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, seed: int = 42):
+def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, seed: int = 42, dampen: float = 0.5):
     teacher_labeled = teacher_labeled or str(
         Path.home() / "projects" / "gut-check" / "training" / "eval" / "local_data" / "combined_teacher_labeled.jsonl"
     )
@@ -422,8 +422,8 @@ def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, 
     gold_items = [{"id": r["id"], "claim_text": r["claim_text"], "context": r["context"]} for r in gold_rows]
     gold_truth = {str(r["id"]): r["label"] for r in gold_rows}
 
-    print(f"training on {len(rows)} teacher-labeled rows (seed={seed}), evaluating on {len(gold_items)} gold items")
-    result = finetune.remote(rows, gold_items, gold_truth, seed=seed)
+    print(f"training on {len(rows)} teacher-labeled rows (seed={seed}, dampen={dampen}), evaluating on {len(gold_items)} gold items")
+    result = finetune.remote(rows, gold_items, gold_truth, seed=seed, dampen=dampen)
 
     print(f"\nn_train_items: {result['n_train_items']}")
     print(f"gold-set accuracy: {result['gold_accuracy']:.1%}")
@@ -446,7 +446,7 @@ def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, 
     # a worse re-run overwrote a 43.6%-accuracy checkpoint with no backup).
     runs_dir = Path.home() / "projects" / "gut-check" / "training" / "finetune" / "local_data" / "runs"
     import time as _time
-    run_id = f"seed{seed}_n{result['n_train_items']}_{_time.strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"seed{seed}_n{result['n_train_items']}_d{dampen}_{_time.strftime('%Y%m%d_%H%M%S')}"
     out_dir = runs_dir / run_id
     (out_dir / "tokenizer").mkdir(parents=True, exist_ok=True)
     (out_dir / "encoder").mkdir(parents=True, exist_ok=True)
