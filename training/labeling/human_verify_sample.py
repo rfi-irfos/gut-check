@@ -19,7 +19,9 @@ import argparse
 import json
 import random
 import re
+import sys
 from collections import Counter, defaultdict
+from pathlib import Path
 
 
 def stratified_sample(rows, rate: float, seed: int, strata_keys=("teacher_label", "source")):
@@ -76,7 +78,21 @@ def parse_review_sheet(sheet_path):
     return items
 
 
-def score_reviewed_sheet(sheet_path, known_heuristic_error_rate: float = 0.47):
+def score_reviewed_sheet(sheet_path, known_heuristic_error_rate: float | None = None):
+    import os
+    if known_heuristic_error_rate is None:
+        sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
+        from heuristic_baseline import score_against_gold
+        gold_path = os.environ.get(
+            "GUT_CHECK_GOLD_EVAL_PATH",
+            str(Path(__file__).parent.parent / "eval" / "local_data" / "gold_eval.jsonl"),
+        )
+        baseline_result = score_against_gold(gold_path)
+        known_heuristic_error_rate = 1.0 - baseline_result["accuracy"]
+        source_note = f"computed live from {baseline_result['n']}-item gold set at {gold_path}"
+    else:
+        source_note = "explicitly passed"
+
     items = parse_review_sheet(sheet_path)
     if not items:
         print("no completed items found (fill in human_label: per item first)")
@@ -87,7 +103,7 @@ def score_reviewed_sheet(sheet_path, known_heuristic_error_rate: float = 0.47):
     print(f"n reviewed:              {n}")
     print(f"teacher errors:          {errors}")
     print(f"teacher error rate:      {error_rate:.1%}")
-    print(f"known heuristic error rate: {known_heuristic_error_rate:.1%}")
+    print(f"known heuristic error rate: {known_heuristic_error_rate:.1%} ({source_note})")
     if error_rate < known_heuristic_error_rate:
         print("GO: teacher error rate is materially below the heuristic baseline -- "
               "safe to scale up labeling.")
@@ -108,7 +124,7 @@ def main():
 
     sc = sub.add_parser("score")
     sc.add_argument("--sheet", required=True)
-    sc.add_argument("--heuristic-error-rate", type=float, default=0.47)
+    sc.add_argument("--heuristic-error-rate", type=float, default=None)
 
     args = ap.parse_args()
     if args.cmd == "sample":
