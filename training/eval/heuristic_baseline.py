@@ -21,6 +21,7 @@ rather than labeling them -- scoring has no "exclude" option):
 """
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "mining"))
@@ -65,10 +66,13 @@ def score_against_gold(gold_path: str) -> dict:
                 "predicted_label": pred, "reason": reason,
             })
     n = len(rows)
+    label_counts = Counter(row["label"] for row in rows)
+    majority_class_count = label_counts.most_common(1)[0][1] if label_counts else 0
     return {
         "n": n,
         "correct": correct,
         "accuracy": correct / n if n else 0.0,
+        "majority_class_accuracy": majority_class_count / n if n else 0.0,
         "errors": errors,
     }
 
@@ -82,6 +86,7 @@ def main():
     print(f"n gold items:      {result['n']}")
     print(f"heuristic correct: {result['correct']}")
     print(f"heuristic accuracy: {result['accuracy']:.1%}")
+    print(f"majority-class accuracy: {result['majority_class_accuracy']:.1%}")
     if result["errors"]:
         print(f"\n{len(result['errors'])} errors (id, gold_label, predicted_label, reason):")
         for e in result["errors"]:

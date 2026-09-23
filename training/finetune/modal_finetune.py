@@ -392,6 +392,8 @@ def main(teacher_labeled: str = None, gold_eval: str = None, limit: int = None, 
     heuristic_result = score_against_gold(gold_path)
     print(f"heuristic baseline (live, same {heuristic_result['n']}-item gold set): "
           f"{heuristic_result['accuracy']:.1%}")
+    print(f"majority-class baseline (same gold set): "
+          f"{heuristic_result['majority_class_accuracy']:.1%}")
     if result["gold_accuracy"] > heuristic_result["accuracy"]:
         print("fine-tuned checkpoint BEATS the live heuristic baseline on this gold set.")
     else:

@@ -39,12 +39,17 @@ def get_gate() -> Gate:
 
 
 @app.tool()
-def verify_claim(claim_text: str, context: str) -> dict:
+def verify_claim(claim_text: str, context: str, confidence_threshold: float = 0.55) -> dict:
     """Classify a status/completion claim against nearby evidence. Returns a
     verdict with a confidence-based escalation recommendation -- this tool
     never verifies anything itself, it only signals when a claim looks
-    uncertain enough to warrant a deeper check by the calling agent."""
+    uncertain enough to warrant a deeper check by the calling agent.
+
+    `confidence_threshold` overrides EscalationPolicy's own default (0.55) per
+    call, without disturbing the cached Gate/router singleton -- the policy is
+    cheap to construct fresh each call, unlike the loaded model."""
     gate = get_gate()
+    gate.policy = EscalationPolicy(confidence_threshold=confidence_threshold)
     verdict = gate.classify(
         state={"claim": claim_text, "context": context},
         questions=causal_claim_verification,

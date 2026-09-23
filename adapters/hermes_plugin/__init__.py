@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,7 +57,7 @@ def _call_gate(claim: str, context: str) -> Optional[Dict[str, Any]]:
 
         async def _call():
             server_params = StdioServerParameters(
-                command="python3",
+                command=sys.executable,
                 args=["-m", "gut_check_mcp.server"],
                 cwd=GUT_CHECK_MCP_SERVER_DIR,
             )
@@ -64,7 +65,12 @@ def _call_gate(claim: str, context: str) -> Optional[Dict[str, Any]]:
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     result = await session.call_tool(
-                        "verify_claim", {"claim_text": claim, "context": context},
+                        "verify_claim",
+                        {
+                            "claim_text": claim,
+                            "context": context,
+                            "confidence_threshold": CONFIDENCE_THRESHOLD,
+                        },
                     )
                     # call_tool returns a CallToolResult whose .content is a list of
                     # content blocks -- FastMCP serializes a dict tool return as a
@@ -73,7 +79,11 @@ def _call_gate(claim: str, context: str) -> Optional[Dict[str, Any]]:
                     # keep using verdict.get("choice") etc. unchanged.
                     return _json.loads(result.content[0].text)
 
-        return asyncio.run(_call())
+        # A hung or slow MCP server must never block the turn indefinitely --
+        # asyncio.TimeoutError is a subclass of Exception, so it's caught by
+        # the broad except below and logged the same way as any other
+        # gate-unreachable failure.
+        return asyncio.run(asyncio.wait_for(_call(), timeout=10.0))
     except Exception as e:
         # Never blocks the turn on gate unavailability -- mirrors
         # lauras-agents-gate's local-fallback-on-unreachable behavior.

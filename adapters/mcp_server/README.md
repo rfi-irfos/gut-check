@@ -20,3 +20,11 @@ about it.
 ## Publish to Smithery
 
 See `smithery.yaml` in this directory.
+
+## Packaging caveat
+
+Currently requires a `gut-check` repo checkout -- the server locates
+`core/gate` via a relative path (`sys.path.insert` pointing at `../../core`
+from the package), and `laya` is not yet declared as a package dependency in
+`pyproject.toml`. Not yet installable/runnable as a standalone package
+outside this repo; that packaging work is a follow-up, not yet done.

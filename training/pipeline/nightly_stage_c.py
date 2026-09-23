@@ -24,7 +24,20 @@ SCARCITY_ORDER = {"CONTRADICTED": 0, "VERIFIED": 1, "SKIP": 2, "UNVERIFIED": 3}
 
 
 def dedupe_candidates(new_candidates: list[dict], already_seen: set[str]) -> list[dict]:
-    return [c for c in new_candidates if c["claim_text"] not in already_seen]
+    """Filters against already-labeled claims AND against duplicate
+    claim_texts within this same batch of new_candidates, keeping only the
+    first occurrence of each -- mining both corpora in one run can surface
+    the same claim_text twice (e.g. it appears in both the Claude-Code and
+    Hermes traces), and that shouldn't slip through as two "new" items."""
+    seen_this_batch: set[str] = set()
+    deduped = []
+    for c in new_candidates:
+        claim = c["claim_text"]
+        if claim in already_seen or claim in seen_this_batch:
+            continue
+        seen_this_batch.add(claim)
+        deduped.append(c)
+    return deduped
 
 
 def sort_by_scarcity(candidates: list[dict]) -> list[dict]:
@@ -67,6 +80,15 @@ def main():
     ap.add_argument("--label-batch-size", type=int, default=200)
     ap.add_argument("--concurrency", type=int, default=6)
     args = ap.parse_args()
+
+    # concurrency 20 previously triggered a multi-minute hard NIM rate-limit
+    # lockout -- reject anything above the documented safe ceiling outright
+    # rather than silently clamping it, so a bad crontab edit fails loudly.
+    if args.concurrency > 8:
+        ap.error(
+            f"--concurrency {args.concurrency} exceeds the safe ceiling of 8 -- "
+            f"concurrency 20 previously triggered a multi-minute NIM rate-limit lockout"
+        )
 
     already_seen = load_already_labeled_claims()
     all_candidates = run_mining()

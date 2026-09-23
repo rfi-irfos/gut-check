@@ -87,9 +87,26 @@ def score_reviewed_sheet(sheet_path, known_heuristic_error_rate: float | None = 
             "GUT_CHECK_GOLD_EVAL_PATH",
             str(Path(__file__).parent.parent / "eval" / "local_data" / "gold_eval.jsonl"),
         )
-        baseline_result = score_against_gold(gold_path)
-        known_heuristic_error_rate = 1.0 - baseline_result["accuracy"]
-        source_note = f"computed live from {baseline_result['n']}-item gold set at {gold_path}"
+        try:
+            baseline_result = score_against_gold(gold_path)
+        except FileNotFoundError:
+            print(
+                f"error: no gold eval set found at {gold_path} -- run mining first, "
+                f"or pass --heuristic-error-rate explicitly"
+            )
+            return
+        # Floor the gate against whichever baseline is stronger -- the live
+        # heuristic or trivial majority-class guessing -- so a heuristic that's
+        # worse than just guessing the majority class can never make the gate
+        # easier to pass than guessing would.
+        known_heuristic_error_rate = 1.0 - max(
+            baseline_result["accuracy"], baseline_result["majority_class_accuracy"]
+        )
+        source_note = (
+            f"computed live from {baseline_result['n']}-item gold set at {gold_path} "
+            f"(heuristic accuracy: {baseline_result['accuracy']:.1%}, "
+            f"majority-class accuracy: {baseline_result['majority_class_accuracy']:.1%})"
+        )
     else:
         source_note = "explicitly passed"
 
