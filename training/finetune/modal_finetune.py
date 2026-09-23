@@ -110,6 +110,29 @@ def build_training_items(rows, tok, cfg):
     return items
 
 
+def compute_class_weights(items, n_classes):
+    """Inverse-frequency weights for the CE/RL loss terms.
+
+    balance_classes() only caps the single dominant class (UNVERIFIED) down
+    to 1.5x the second-largest class -- it never lifts CONTRADICTED/SKIP up,
+    so even after "balancing" they stay at a few percent of the training set
+    (measured: 6% CONTRADICTED, 2% SKIP on the 2,882-item set) and the model
+    essentially never learns to predict them (0/1 predictions out of 74 gold
+    items on that run, vs 7/8 true occurrences). Oversampling those classes
+    was tried earlier and caused memorization (loss collapsed to ~0.04) --
+    this reweights the loss instead, without duplicating any example.
+    """
+    from collections import Counter
+
+    counts = Counter(it["label"] for it in items)
+    total = len(items)
+    weights = [0.0] * n_classes
+    for c in range(n_classes):
+        if counts.get(c, 0) > 0:
+            weights[c] = total / (n_classes * counts[c])
+    return weights
+
+
 def collate_train_batch(items, pad_id):
     import torch
 
@@ -163,6 +186,10 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, see
     print(f"preprocessing {len(teacher_labeled_rows)} teacher-labeled rows...")
     items = build_training_items(teacher_labeled_rows, tok, cfg)
     print(f"built {len(items)} training sequences")
+
+    n_classes = max(it["label"] for it in items) + 1
+    class_weights = torch.tensor(compute_class_weights(items, n_classes), device=device)
+    print(f"class weights (inverse-frequency, {n_classes} classes): {class_weights.tolist()}")
 
     model = build_model(cfg, encoder_dir=f"{model_dir}/encoder")
     weights = load_file(f"{model_dir}/model.safetensors")
@@ -222,9 +249,11 @@ def finetune(teacher_labeled_rows: list, gold_items: list, gold_truth: dict, see
                 adv = r - r.mean(0, keepdim=True)
                 adv = adv / (adv.std() + 1e-6)
 
+            sample_w = class_weights[batch["label"].to(device)]
+
             logp = -(((z - logits.unsqueeze(0)) ** 2) * mask).sum(-1) / (2 * sigma ** 2)
-            loss_rl = -(adv * logp).mean()
-            loss_ce = -(target * torch.log_softmax(logits.masked_fill(~mask, -1e4), -1)).sum(-1).mean()
+            loss_rl = -(sample_w * adv * logp).mean()
+            loss_ce = -(sample_w * (target * torch.log_softmax(logits.masked_fill(~mask, -1e4), -1)).sum(-1)).mean()
             loss = (loss_rl + 1.0 * loss_ce) / GRAD_ACCUM + 0.0 * act.sum()
 
             scaler.scale(loss).backward()
